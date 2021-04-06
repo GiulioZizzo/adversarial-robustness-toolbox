@@ -30,17 +30,13 @@ from typing import Optional, Union, TYPE_CHECKING
 
 import numpy as np
 from scipy.stats import truncnorm
-from tqdm import trange
+from tqdm.auto import trange
 
 from art.attacks.evasion.fast_gradient import FastGradientMethod
 from art.config import ART_NUMPY_DTYPE
 from art.estimators.classification.classifier import ClassifierMixin
 from art.estimators.estimator import BaseEstimator, LossGradientsMixin
-from art.utils import (
-    compute_success,
-    get_labels_np_array,
-    check_and_transform_label_format,
-)
+from art.utils import compute_success, get_labels_np_array, check_and_transform_label_format, compute_success_array
 
 if TYPE_CHECKING:
     from art.utils import CLASSIFIER_LOSS_GRADIENTS_TYPE, OBJECT_DETECTOR_TYPE
@@ -65,8 +61,8 @@ class ProjectedGradientDescentCommon(FastGradientMethod):
         self,
         estimator: Union["CLASSIFIER_LOSS_GRADIENTS_TYPE", "OBJECT_DETECTOR_TYPE"],
         norm: Union[int, float, str] = np.inf,
-        eps: float = 0.3,
-        eps_step: float = 0.1,
+        eps: Union[int, float, np.ndarray] = 0.3,
+        eps_step: Union[int, float, np.ndarray] = 0.1,
         max_iter: int = 100,
         targeted: bool = False,
         num_random_init: int = 0,
@@ -108,8 +104,13 @@ class ProjectedGradientDescentCommon(FastGradientMethod):
         ProjectedGradientDescentCommon._check_params(self)
 
         if self.random_eps:
-            lower, upper = 0, eps
-            mu, sigma = 0, (eps / 2)
+            if isinstance(eps, (int, float)):
+                lower, upper = 0, eps
+                mu, sigma = 0, (eps / 2)
+            else:
+                lower, upper = np.zeros_like(eps), eps
+                mu, sigma = np.zeros_like(eps), (eps / 2)
+
             self.norm_dist = truncnorm((lower - mu) / sigma, (upper - mu) / sigma, loc=mu, scale=sigma)
 
     def _random_eps(self):
@@ -118,7 +119,12 @@ class ProjectedGradientDescentCommon(FastGradientMethod):
         """
         if self.random_eps:
             ratio = self.eps_step / self.eps
-            self.eps = np.round(self.norm_dist.rvs(1)[0], 10)
+
+            if isinstance(self.eps, (int, float)):
+                self.eps = np.round(self.norm_dist.rvs(1)[0], 10)
+            else:
+                self.eps = np.round(self.norm_dist.rvs(size=self.eps.shape), 10)
+
             self.eps_step = ratio * self.eps
 
     def _set_targets(self, x: np.ndarray, y: np.ndarray, classifier_mixin: bool = True) -> np.ndarray:
@@ -152,35 +158,59 @@ class ProjectedGradientDescentCommon(FastGradientMethod):
 
         return targets
 
-    @staticmethod
-    def _get_mask(x: np.ndarray, **kwargs) -> np.ndarray:
-        """
-        Get the mask from the kwargs.
-
-        :param x: An array with the original inputs.
-        :param mask: An array with a mask to be applied to the adversarial perturbations. Shape needs to be
-                     broadcastable to the shape of x. Any features for which the mask is zero will not be adversarially
-                     perturbed.
-        :type mask: `np.ndarray`
-        :return: The mask.
-        """
-        mask = kwargs.get("mask")
-
-        if mask is not None:
-            # Ensure the mask is broadcastable
-            if len(mask.shape) > len(x.shape) or mask.shape != x.shape[-len(mask.shape) :]:
-                raise ValueError("Mask shape must be broadcastable to input shape.")
-
-        return mask
-
     def _check_params(self) -> None:
-        super(ProjectedGradientDescentCommon, self)._check_params()
 
-        if self.eps_step > self.eps:
-            raise ValueError("The iteration step `eps_step` has to be smaller than the total attack `eps`.")
+        if self.norm not in [1, 2, np.inf, "inf"]:
+            raise ValueError('Norm order must be either 1, 2, `np.inf` or "inf".')
 
-        if self.max_iter <= 0:
-            raise ValueError("The number of iterations `max_iter` has to be a positive integer.")
+        if not (
+            isinstance(self.eps, (int, float))
+            and isinstance(self.eps_step, (int, float))
+            or isinstance(self.eps, np.ndarray)
+            and isinstance(self.eps_step, np.ndarray)
+        ):
+            raise TypeError(
+                "The perturbation size `eps` and the perturbation step-size `eps_step` must have the same type of `int`"
+                ", `float`, or `np.ndarray`."
+            )
+
+        if isinstance(self.eps, (int, float)):
+            if self.eps < 0:
+                raise ValueError("The perturbation size `eps` has to be nonnegative.")
+        else:
+            if (self.eps < 0).any():
+                raise ValueError("The perturbation size `eps` has to be nonnegative.")
+
+        if isinstance(self.eps_step, (int, float)):
+            if self.eps_step <= 0:
+                raise ValueError("The perturbation step-size `eps_step` has to be positive.")
+        else:
+            if (self.eps_step <= 0).any():
+                raise ValueError("The perturbation step-size `eps_step` has to be positive.")
+
+        if isinstance(self.eps, np.ndarray) and isinstance(self.eps_step, np.ndarray):
+            if self.eps.shape != self.eps_step.shape:
+                raise ValueError(
+                    "The perturbation size `eps` and the perturbation step-size `eps_step` must have the same shape."
+                )
+
+        if not isinstance(self.targeted, bool):
+            raise ValueError("The flag `targeted` has to be of type bool.")
+
+        if not isinstance(self.num_random_init, (int, np.int)):
+            raise TypeError("The number of random initialisations has to be of type integer.")
+
+        if self.num_random_init < 0:
+            raise ValueError("The number of random initialisations `random_init` has to be greater than or equal to 0.")
+
+        if self.batch_size <= 0:
+            raise ValueError("The batch size `batch_size` has to be positive.")
+
+        if self.max_iter < 0:
+            raise ValueError("The number of iterations `max_iter` has to be a nonnegative integer.")
+
+        if not isinstance(self.verbose, bool):
+            raise ValueError("The verbose has to be a Boolean.")
 
 
 class ProjectedGradientDescentNumpy(ProjectedGradientDescentCommon):
@@ -196,8 +226,8 @@ class ProjectedGradientDescentNumpy(ProjectedGradientDescentCommon):
         self,
         estimator: Union["CLASSIFIER_LOSS_GRADIENTS_TYPE", "OBJECT_DETECTOR_TYPE"],
         norm: Union[int, float, str] = np.inf,
-        eps: float = 0.3,
-        eps_step: float = 0.1,
+        eps: Union[int, float, np.ndarray] = 0.3,
+        eps_step: Union[int, float, np.ndarray] = 0.1,
         max_iter: int = 100,
         targeted: bool = False,
         num_random_init: int = 0,
@@ -248,12 +278,17 @@ class ProjectedGradientDescentNumpy(ProjectedGradientDescentCommon):
                   samples. Otherwise, model predictions are used as labels to avoid the "label leaking" effect
                   (explained in this paper: https://arxiv.org/abs/1611.01236). Default is `None`.
 
-        :param mask: An array with a mask to be applied to the adversarial perturbations. Shape needs to be
-                     broadcastable to the shape of x. Any features for which the mask is zero will not be adversarially
-                     perturbed.
+        :param mask: An array with a mask broadcastable to input `x` defining where to apply adversarial perturbations.
+                     Shape needs to be broadcastable to the shape of x and can also be of the same shape as `x`. Any
+                     features for which the mask is zero will not be adversarially perturbed.
         :type mask: `np.ndarray`
         :return: An array holding the adversarial examples.
         """
+        mask = self._get_mask(x, **kwargs)
+
+        # Ensure eps is broadcastable
+        self._check_compatibility_input_and_eps(x=x)
+
         # Check whether random eps is enabled
         self._random_eps()
 
@@ -261,47 +296,58 @@ class ProjectedGradientDescentNumpy(ProjectedGradientDescentCommon):
             # Set up targets
             targets = self._set_targets(x, y)
 
-            # Get the mask
-            mask = self._get_mask(x, **kwargs)
-
             # Start to compute adversarial examples
-            adv_x_best = None
-            rate_best = None
+            adv_x = x.astype(ART_NUMPY_DTYPE)
 
-            for _ in trange(
-                max(1, self.num_random_init), desc="PGD - Random Initializations", disable=not self.verbose
-            ):
-                adv_x = x.astype(ART_NUMPY_DTYPE)
+            for batch_id in range(int(np.ceil(x.shape[0] / float(self.batch_size)))):
+                for rand_init_num in trange(
+                    max(1, self.num_random_init), desc="PGD - Random Initializations", disable=not self.verbose
+                ):
+                    batch_index_1, batch_index_2 = batch_id * self.batch_size, (batch_id + 1) * self.batch_size
+                    batch_index_2 = min(batch_index_2, x.shape[0])
+                    batch = x[batch_index_1:batch_index_2]
+                    batch_labels = targets[batch_index_1:batch_index_2]
+                    mask_batch = mask
 
-                for i_max_iter in trange(self.max_iter, desc="PGD - Iterations", leave=False, disable=not self.verbose):
-                    adv_x = self._compute(
-                        adv_x,
-                        x,
-                        targets,
-                        mask,
-                        self.eps,
-                        self.eps_step,
-                        self._project,
-                        self.num_random_init > 0 and i_max_iter == 0,
-                    )
+                    if mask is not None:
+                        if len(mask.shape) == len(x.shape):
+                            mask_batch = mask[batch_index_1:batch_index_2]
 
-                if self.num_random_init > 1:
-                    rate = 100 * compute_success(
-                        self.estimator, x, targets, adv_x, self.targeted, batch_size=self.batch_size,  # type: ignore
-                    )
-                    if rate_best is None or rate > rate_best or adv_x_best is None:
-                        rate_best = rate
-                        adv_x_best = adv_x
-                else:
-                    adv_x_best = adv_x
+                    for i_max_iter in trange(
+                        self.max_iter, desc="PGD - Iterations", leave=False, disable=not self.verbose
+                    ):
+                        batch = self._compute(
+                            batch,
+                            x[batch_index_1:batch_index_2],
+                            batch_labels,
+                            mask_batch,
+                            self.eps,
+                            self.eps_step,
+                            self._project,
+                            self.num_random_init > 0 and i_max_iter == 0,
+                        )
+
+                    if rand_init_num == 0:
+                        # initial (and possibly only) random restart: we only have this set of
+                        # adversarial examples for now
+                        adv_x[batch_index_1:batch_index_2] = np.copy(batch)
+                    else:
+                        # replace adversarial examples if they are successful
+                        attack_success = compute_success_array(
+                            self.estimator,
+                            x[batch_index_1:batch_index_2],
+                            targets[batch_index_1:batch_index_2],
+                            batch,
+                            self.targeted,
+                            batch_size=self.batch_size,
+                        )
+                        adv_x[batch_index_1:batch_index_2][attack_success] = batch[attack_success]
 
             logger.info(
                 "Success rate of attack: %.2f%%",
-                rate_best
-                if rate_best is not None
-                else 100
+                100
                 * compute_success(
-                    self.estimator, x, y, adv_x_best, self.targeted, batch_size=self.batch_size,  # type: ignore
+                    self.estimator, x, targets, adv_x, self.targeted, batch_size=self.batch_size,  # type: ignore
                 ),
             )
         else:
@@ -310,9 +356,6 @@ class ProjectedGradientDescentNumpy(ProjectedGradientDescentCommon):
 
             # Set up targets
             targets = self._set_targets(x, y, classifier_mixin=False)
-
-            # Get the mask
-            mask = self._get_mask(x, **kwargs)
 
             # Start to compute adversarial examples
             if x.dtype == np.object:
@@ -332,6 +375,4 @@ class ProjectedGradientDescentNumpy(ProjectedGradientDescentCommon):
                     self.num_random_init > 0 and i_max_iter == 0,
                 )
 
-            adv_x_best = adv_x
-
-        return adv_x_best
+        return adv_x

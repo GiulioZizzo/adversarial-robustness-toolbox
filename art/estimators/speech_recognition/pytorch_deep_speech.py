@@ -22,23 +22,22 @@ Mandarin in PyTorch.
 | Paper link: https://arxiv.org/abs/1512.02595
 """
 import logging
-from typing import List, Optional, Tuple, Union, TYPE_CHECKING
+from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 import numpy as np
 
-from art.estimators.speech_recognition.speech_recognizer import SpeechRecognizerMixin
+from art import config
 from art.estimators.pytorch import PyTorchEstimator
+from art.estimators.speech_recognition.speech_recognizer import SpeechRecognizerMixin
 from art.utils import get_file
-from art.config import ART_DATA_PATH, ART_NUMPY_DTYPE
 
 if TYPE_CHECKING:
     import torch
-
     from deepspeech_pytorch.model import DeepSpeech
 
-    from art.config import CLIP_VALUES_TYPE, PREPROCESSING_TYPE
-    from art.defences.preprocessor.preprocessor import Preprocessor
     from art.defences.postprocessor.postprocessor import Postprocessor
+    from art.defences.preprocessor.preprocessor import Preprocessor
+    from art.utils import CLIP_VALUES_TYPE, PREPROCESSING_TYPE
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +49,8 @@ class PyTorchDeepSpeech(SpeechRecognizerMixin, PyTorchEstimator):
 
     | Paper link: https://arxiv.org/abs/1512.02595
     """
+
+    estimator_params = PyTorchEstimator.estimator_params + ["optimizer", "use_amp", "opt_level", "lm_config", "verbose"]
 
     def __init__(
         self,
@@ -75,6 +76,7 @@ class PyTorchDeepSpeech(SpeechRecognizerMixin, PyTorchEstimator):
         postprocessing_defences: Union["Postprocessor", List["Postprocessor"], None] = None,
         preprocessing: "PREPROCESSING_TYPE" = None,
         device_type: str = "gpu",
+        verbose: bool = True,
     ):
         """
         Initialization of an instance PyTorchDeepSpeech.
@@ -123,18 +125,21 @@ class PyTorchDeepSpeech(SpeechRecognizerMixin, PyTorchEstimator):
                             if available otherwise run on CPU.
         """
         import torch  # lgtm [py/repeated-import]
-
         from deepspeech_pytorch.configs.inference_config import LMConfig
         from deepspeech_pytorch.enums import DecoderType
         from deepspeech_pytorch.utils import load_decoder, load_model
 
         # Super initialization
         super().__init__(
+            model=None,
             clip_values=clip_values,
+            channels_first=None,
             preprocessing_defences=preprocessing_defences,
             postprocessing_defences=postprocessing_defences,
             preprocessing=preprocessing,
         )
+
+        self.verbose = verbose
 
         # Check clip values
         if self.clip_values is not None:
@@ -154,6 +159,8 @@ class PyTorchDeepSpeech(SpeechRecognizerMixin, PyTorchEstimator):
         else:
             cuda_idx = torch.cuda.current_device()
             self._device = torch.device("cuda:{}".format(cuda_idx))
+
+        self._input_shape = None
 
         # Load model
         if model is None:
@@ -190,7 +197,9 @@ class PyTorchDeepSpeech(SpeechRecognizerMixin, PyTorchEstimator):
                 raise ValueError("The input pretrained model %s is not supported." % pretrained_model)
 
             # Download model
-            model_path = get_file(filename=filename, path=ART_DATA_PATH, url=url, extract=False)
+            model_path = get_file(
+                filename=filename, path=config.ART_DATA_PATH, url=url, extract=False, verbose=self.verbose
+            )
 
             # Then load model
             self._model = load_model(device=self._device, model_path=model_path, use_half=use_half)
@@ -204,6 +213,7 @@ class PyTorchDeepSpeech(SpeechRecognizerMixin, PyTorchEstimator):
         # Save first version of the optimizer
         self._optimizer = optimizer
         self._use_amp = use_amp
+        self._opt_level = opt_level
 
         # Now create a decoder
         # Create the language model config first
@@ -225,6 +235,7 @@ class PyTorchDeepSpeech(SpeechRecognizerMixin, PyTorchEstimator):
         lm_config.cutoff_prob = cutoff_prob
         lm_config.beam_width = beam_width
         lm_config.lm_workers = lm_workers
+        self.lm_config = lm_config
 
         # Create the decoder with the lm config
         self.decoder = load_decoder(labels=self._model.labels, cfg=lm_config)
@@ -264,10 +275,9 @@ class PyTorchDeepSpeech(SpeechRecognizerMixin, PyTorchEstimator):
         :param batch_size: Batch size.
         :param transcription_output: Indicate whether the function will produce probability or transcription as
                                      prediction output. If transcription_output is not available, then probability
-                                     output is returned.
-        :type transcription_output: `bool`
+                                     output is returned. Default: True
         :return: Predicted probability (if transcription_output False) or transcription (default, if
-                 transcription_output is True or None):
+                 transcription_output is True):
                  - Probability return is a tuple of (probs, sizes), where `probs` is the probability of characters of
                  shape (nb_samples, seq_length, nb_classes) and `sizes` is the real sequence length of shape
                  (nb_samples,).
@@ -276,17 +286,17 @@ class PyTorchDeepSpeech(SpeechRecognizerMixin, PyTorchEstimator):
         """
         import torch  # lgtm [py/repeated-import]
 
-        x_ = np.empty(len(x), dtype=object)
-        x_[:] = list(x)
+        x_in = np.empty(len(x), dtype=object)
+        x_in[:] = list(x)
 
         # Put the model in the eval mode
         self._model.eval()
 
         # Apply preprocessing
-        x_preprocessed, _ = self._apply_preprocessing(x_, y=None, fit=False)
+        x_preprocessed, _ = self._apply_preprocessing(x_in, y=None, fit=False)
 
         # Transform x into the model input space
-        inputs, targets, input_rates, target_sizes, batch_idx = self.transform_model_input(x=x_preprocessed)
+        inputs, _, input_rates, _, batch_idx = self._transform_model_input(x=x_preprocessed)
 
         # Compute real input sizes
         input_sizes = input_rates.mul_(inputs.size()[-1]).int()
@@ -314,7 +324,8 @@ class PyTorchDeepSpeech(SpeechRecognizerMixin, PyTorchEstimator):
 
         # Aggregate results
         result_outputs = np.zeros(
-            (x_preprocessed.shape[0], result_output_sizes.max(), results[0].shape[-1]), dtype=np.float32
+            shape=(x_preprocessed.shape[0], result_output_sizes.max(), results[0].shape[-1]),
+            dtype=config.ART_NUMPY_DTYPE,
         )
 
         for m in range(num_batch):
@@ -334,7 +345,7 @@ class PyTorchDeepSpeech(SpeechRecognizerMixin, PyTorchEstimator):
         result_outputs[batch_idx] = result_outputs_
 
         # Check if users want transcription outputs
-        transcription_output = kwargs.get("transcription_output")
+        transcription_output = kwargs.get("transcription_output", True)
 
         if transcription_output is False:
             return result_outputs, result_output_sizes
@@ -362,17 +373,19 @@ class PyTorchDeepSpeech(SpeechRecognizerMixin, PyTorchEstimator):
         """
         from warpctc_pytorch import CTCLoss
 
-        x_ = np.empty(len(x), dtype=object)
-        x_[:] = list(x)
+        x_in = np.empty(len(x), dtype=object)
+        x_in[:] = list(x)
 
-        # Put the model in the training mode
+        # Put the model in the training mode, otherwise CUDA can't backpropagate through the model.
+        # However, model uses batch norm layers which need to be frozen
         self._model.train()
+        self.set_batchnorm(train=False)
 
         # Apply preprocessing
-        x_preprocessed, y_preprocessed = self._apply_preprocessing(x_, y, fit=False)
+        x_preprocessed, y_preprocessed = self._apply_preprocessing(x_in, y, fit=False)
 
         # Transform data into the model input space
-        inputs, targets, input_rates, target_sizes, batch_idx = self.transform_model_input(
+        inputs, targets, input_rates, target_sizes, _ = self._transform_model_input(
             x=x_preprocessed, y=y_preprocessed, compute_gradient=True
         )
 
@@ -400,23 +413,25 @@ class PyTorchDeepSpeech(SpeechRecognizerMixin, PyTorchEstimator):
             loss.backward()
 
         # Get results
-        results = []
-        for i in range(len(x_preprocessed)):
-            results.append(x_preprocessed[i].grad.cpu().numpy().copy())
+        results_list = list()
+        for i, _ in enumerate(x_preprocessed):
+            results_list.append(x_preprocessed[i].grad.cpu().numpy().copy())
 
-        results = np.array(results)
+        results = np.array(results_list)
 
         if results.shape[0] == 1:
             results_ = np.empty(len(results), dtype=object)
             results_[:] = list(results)
             results = results_
 
-        results = self._apply_preprocessing_gradient(x_, results)
+        results = self._apply_preprocessing_gradient(x_in, results)
 
         if x.dtype != np.object:
             results = np.array([i for i in results], dtype=x.dtype)
             assert results.shape == x.shape and results.dtype == x.dtype
 
+        # Unfreeze batch norm layers again
+        self.set_batchnorm(train=True)
         return results
 
     def fit(self, x: np.ndarray, y: np.ndarray, batch_size: int = 128, nb_epochs: int = 10, **kwargs) -> None:
@@ -437,6 +452,9 @@ class PyTorchDeepSpeech(SpeechRecognizerMixin, PyTorchEstimator):
 
         from warpctc_pytorch import CTCLoss
 
+        x_in = np.empty(len(x), dtype=object)
+        x_in[:] = list(x)
+
         # Put the model in the training mode
         self._model.train()
 
@@ -444,7 +462,7 @@ class PyTorchDeepSpeech(SpeechRecognizerMixin, PyTorchEstimator):
             raise ValueError("An optimizer is required to train the model, but none was provided.")
 
         # Apply preprocessing
-        x_preprocessed, y_preprocessed = self._apply_preprocessing(x, y, fit=True)
+        x_preprocessed, y_preprocessed = self._apply_preprocessing(x_in, y, fit=True)
 
         # Train with batch processing
         num_batch = int(np.ceil(len(x_preprocessed) / float(batch_size)))
@@ -472,7 +490,7 @@ class PyTorchDeepSpeech(SpeechRecognizerMixin, PyTorchEstimator):
                 o_batch = y_preprocessed[ind[begin:end]]
 
                 # Transform data into the model input space
-                inputs, targets, input_rates, target_sizes, batch_idx = self.transform_model_input(
+                inputs, targets, input_rates, target_sizes, _ = self._transform_model_input(
                     x=i_batch, y=o_batch, compute_gradient=False
                 )
 
@@ -503,7 +521,44 @@ class PyTorchDeepSpeech(SpeechRecognizerMixin, PyTorchEstimator):
 
                 self._optimizer.step()
 
-    def transform_model_input(
+    def preprocess_transform_model_input(
+        self, x: "torch.Tensor", y: np.ndarray, real_lengths: np.ndarray,
+    ) -> Tuple["torch.Tensor", "torch.Tensor", "torch.Tensor", "torch.Tensor", List]:
+        """
+        Apply preprocessing and then transform the user input space into the model input space. This function is used
+        by the ASR attack to attack into the PyTorchDeepSpeech estimator whose defences are called with the
+        `_apply_preprocessing` function.
+
+        :param x: Samples of shape (nb_samples, seq_length).
+        :param y: Target values of shape (nb_samples). Each sample in `y` is a string and it may possess different
+                  lengths. A possible example of `y` could be: `y = np.array(['SIXTY ONE', 'HELLO'])`.
+        :param real_lengths: Real lengths of original sequences.
+        :return: A tuple of inputs and targets in the model space with the original index
+                 `(inputs, targets, input_percentages, target_sizes, batch_idx)`, where:
+                 - inputs: model inputs of shape (nb_samples, nb_frequencies, seq_length).
+                 - targets: ground truth targets of shape (sum over nb_samples of real seq_lengths).
+                 - input_percentages: percentages of real inputs in inputs.
+                 - target_sizes: list of real seq_lengths.
+                 - batch_idx: original index of inputs.
+        """
+        import torch  # lgtm [py/repeated-import]
+
+        # Apply preprocessing
+        x_batch = []
+        for i, _ in enumerate(x):
+            preprocessed_x_i, _ = self._apply_preprocessing(x=x[i], y=None, no_grad=False)
+            x_batch.append(preprocessed_x_i)
+
+        x = torch.stack(x_batch)
+
+        # Transform the input space
+        inputs, targets, input_rates, target_sizes, batch_idx = self._transform_model_input(
+            x=x, y=y, compute_gradient=False, tensor_input=True, real_lengths=real_lengths,
+        )
+
+        return inputs, targets, input_rates, target_sizes, batch_idx
+
+    def _transform_model_input(
         self,
         x: Union[np.ndarray, "torch.Tensor"],
         y: Optional[np.ndarray] = None,
@@ -532,7 +587,6 @@ class PyTorchDeepSpeech(SpeechRecognizerMixin, PyTorchEstimator):
         """
         import torch  # lgtm [py/repeated-import]
         import torchaudio
-
         from deepspeech_pytorch.loader.data_loader import _collate_fn
 
         # These parameters are needed for the transformation
@@ -564,11 +618,11 @@ class PyTorchDeepSpeech(SpeechRecognizerMixin, PyTorchEstimator):
         transformer.to(self._device)
 
         # Create a label map
-        label_map = dict([(self._model.labels[i], i) for i in range(len(self._model.labels))])
+        label_map = {self._model.labels[i]: i for i in range(len(self._model.labels))}
 
         # We must process each sequence separately due to the diversity of their length
         batch = []
-        for i in range(len(x)):
+        for i, _ in enumerate(x):
             # First process the target
             if y is None:
                 target = []
@@ -577,7 +631,7 @@ class PyTorchDeepSpeech(SpeechRecognizerMixin, PyTorchEstimator):
 
             # Push the sequence to device
             if not tensor_input:
-                x[i] = x[i].astype(ART_NUMPY_DTYPE)
+                x[i] = x[i].astype(config.ART_NUMPY_DTYPE)
                 x[i] = torch.tensor(x[i]).to(self._device)
 
             # Set gradient computation permission
@@ -611,6 +665,15 @@ class PyTorchDeepSpeech(SpeechRecognizerMixin, PyTorchEstimator):
         return inputs, targets, input_percentages, target_sizes, batch_idx
 
     @property
+    def input_shape(self) -> Tuple[int, ...]:
+        """
+        Return the shape of one input sample.
+
+        :return: Shape of one input sample.
+        """
+        return self._input_shape  # type: ignore
+
+    @property
     def model(self) -> "DeepSpeech":
         """
         Get current model.
@@ -628,10 +691,35 @@ class PyTorchDeepSpeech(SpeechRecognizerMixin, PyTorchEstimator):
         """
         return self._device
 
+    @property
+    def use_amp(self) -> bool:
+        """
+        Return a boolean indicating whether to use the automatic mixed precision tool.
+
+        :return: Whether to use the automatic mixed precision tool.
+        """
+        return self._use_amp  # type: ignore
+
+    @property
+    def optimizer(self) -> "torch.optim.Optimizer":
+        """
+        Return the optimizer.
+
+        :return: The optimizer.
+        """
+        return self._optimizer  # type: ignore
+
+    @property
+    def opt_level(self) -> str:
+        """
+        Return a string specifying a pure or mixed precision optimization level.
+
+        :return: A string specifying a pure or mixed precision optimization level. Possible
+                 values are `O0`, `O1`, `O2`, and `O3`.
+        """
+        return self._opt_level  # type: ignore
+
     def get_activations(
         self, x: np.ndarray, layer: Union[int, str], batch_size: int, framework: bool = False
     ) -> np.ndarray:
-        raise NotImplementedError
-
-    def set_learning_phase(self, train: bool) -> None:
         raise NotImplementedError

@@ -28,7 +28,7 @@ from typing import Optional, TYPE_CHECKING, Union
 import numpy as np
 
 from art.defences.transformer.transformer import Transformer
-from art.estimators.certification.neural_cleanse.keras import KerasNeuralCleanse
+from art.estimators.poison_mitigation.neural_cleanse import KerasNeuralCleanse
 from art.estimators.classification.keras import KerasClassifier
 
 if TYPE_CHECKING:
@@ -123,8 +123,8 @@ class NeuralCleanse(Transformer):
                 batch_size=batch_size,
             )
             return transformed_classifier
-        else:
-            raise NotImplementedError("Only Keras classifiers (v2.2.4) are supported for this defence.")
+
+        raise NotImplementedError("Only Keras classifiers (v2.2.4) are supported for this defence.")
 
     def fit(self, x: np.ndarray, y: Optional[np.ndarray] = None, **kwargs) -> None:
         """

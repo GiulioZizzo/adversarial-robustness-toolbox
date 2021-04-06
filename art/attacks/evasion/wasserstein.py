@@ -27,7 +27,7 @@ from typing import Optional, TYPE_CHECKING
 
 import numpy as np
 from scipy.special import lambertw
-from tqdm import trange
+from tqdm.auto import trange
 
 from art.config import ART_NUMPY_DTYPE
 from art.estimators.estimator import BaseEstimator, LossGradientsMixin
@@ -39,6 +39,8 @@ if TYPE_CHECKING:
     from art.utils import CLASSIFIER_LOSS_GRADIENTS_TYPE
 
 logger = logging.getLogger(__name__)
+
+EPS_LOG = 10 ** -10
 
 
 class Wasserstein(EvasionAttack):
@@ -377,6 +379,7 @@ class Wasserstein(EvasionAttack):
         exp_alpha = np.exp(-alpha)
 
         beta = -self.regularization * grad
+        beta = beta.astype(np.float64)
         exp_beta = np.exp(-beta)
 
         # Check for overflow
@@ -399,6 +402,7 @@ class Wasserstein(EvasionAttack):
 
         for _ in range(self.conjugate_sinkhorn_max_iter):
             # Block coordinate descent iterates
+            x[x == 0.0] = EPS_LOG  # Prevent divide by zero in np.log
             alpha[I_nonzero_] = (np.log(self._local_transport(K, exp_beta, self.kernel_size)) - np.log(x))[I_nonzero_]
             exp_alpha = np.exp(-alpha)
 
@@ -474,6 +478,7 @@ class Wasserstein(EvasionAttack):
 
         for _ in range(self.projected_sinkhorn_max_iter):
             # Block coordinate descent iterates
+            x_init[x_init == 0.0] = EPS_LOG  # Prevent divide by zero in np.log
             alpha = np.log(self._local_transport(K, exp_beta, self.kernel_size)) - np.log(x_init)
             exp_alpha = np.exp(-alpha)
 
@@ -537,7 +542,10 @@ class Wasserstein(EvasionAttack):
 
         for i in range(kernel_size):
             for j in range(kernel_size):
-                cost_matrix[i, j] = (abs(i - center) ** 2 + abs(j - center) ** 2) ** (p / 2)
+                # The code of the paper of this attack (https://arxiv.org/abs/1902.07906) implements the cost as:
+                # cost_matrix[i, j] = (abs(i - center) ** 2 + abs(j - center) ** 2) ** (p / 2)
+                # which only can reproduce L2-norm for p=1 correctly
+                cost_matrix[i, j] = (abs(i - center) ** p + abs(j - center) ** p) ** (1 / p)
 
         return cost_matrix
 
@@ -730,8 +738,10 @@ class Wasserstein(EvasionAttack):
         if self.eps_step <= 0:
             raise ValueError("The perturbation step-size `eps_step` has to be positive.")
 
-        if self.eps_step > self.eps:
-            raise ValueError("The iteration step `eps_step` has to be smaller than the total attack `eps`.")
+        if self.norm == "inf" and self.eps_step > self.eps:
+            raise ValueError(
+                "The iteration step `eps_step` has to be smaller than or equal to the total attack budget `eps`."
+            )
 
         if self.eps_iter <= 0:
             raise ValueError("The number of epsilon iterations `eps_iter` has to be a positive integer.")

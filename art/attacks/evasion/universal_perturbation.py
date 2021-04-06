@@ -29,7 +29,7 @@ import types
 from typing import Any, Dict, Optional, Union, TYPE_CHECKING
 
 import numpy as np
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 from art.attacks.attack import EvasionAttack
 from art.estimators.estimator import BaseEstimator
@@ -111,6 +111,38 @@ class UniversalPerturbation(EvasionAttack):
         self.verbose = verbose
         self._check_params()
 
+        # Attack properties
+        self._fooling_rate: Optional[float] = None
+        self._converged: Optional[bool] = None
+        self._noise: Optional[np.ndarray] = None
+
+    @property
+    def fooling_rate(self) -> Optional[float]:
+        """
+        The fooling rate of the universal perturbation on the most recent call to `generate`.
+
+        :return: Fooling Rate.
+        """
+        return self._fooling_rate
+
+    @property
+    def converged(self) -> Optional[bool]:
+        """
+        The convergence of universal perturbation generation.
+
+        :return: `True` if generation of universal perturbation has converged.
+        """
+        return self._converged
+
+    @property
+    def noise(self) -> Optional[np.ndarray]:
+        """
+        The universal perturbation.
+
+        :return: Universal perturbation.
+        """
+        return self._noise
+
     def generate(self, x: np.ndarray, y: Optional[np.ndarray] = None, **kwargs) -> np.ndarray:
         """
         Generate adversarial samples and return them in an array.
@@ -140,7 +172,7 @@ class UniversalPerturbation(EvasionAttack):
 
         # Generate the adversarial examples
         nb_iter = 0
-        pbar = tqdm(self.max_iter, desc="Universal perturbation", disable=not self.verbose)
+        pbar = tqdm(total=self.max_iter, desc="Universal perturbation", disable=not self.verbose)
 
         while fooling_rate < 1.0 - self.delta and nb_iter < self.max_iter:
             # Go through all the examples randomly
@@ -178,9 +210,9 @@ class UniversalPerturbation(EvasionAttack):
             fooling_rate = np.sum(y_index != y_adv) / nb_instances
 
         pbar.close()
-        self.fooling_rate = fooling_rate
-        self.converged = nb_iter < self.max_iter
-        self.noise = noise
+        self._fooling_rate = fooling_rate
+        self._converged = nb_iter < self.max_iter
+        self._noise = noise
         logger.info("Success rate of universal perturbation attack: %.2f%%", 100 * fooling_rate)
 
         return x_adv

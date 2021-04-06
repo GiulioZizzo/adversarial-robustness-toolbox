@@ -68,11 +68,7 @@ class InverseGAN(Preprocessor):
         """
         import tensorflow as tf  # lgtm [py/repeated-import]
 
-        super().__init__()
-
-        self._is_fitted = True
-        self._apply_fit = apply_fit
-        self._apply_predict = apply_predict
+        super().__init__(is_fitted=True, apply_fit=apply_fit, apply_predict=apply_predict)
         self.gan = gan
         self.inverse_gan = inverse_gan
         self.sess = sess
@@ -118,7 +114,7 @@ class InverseGAN(Preprocessor):
             iteration_count += 1
             logging.info("Iteration: %d", iteration_count)
             z_i_reshaped = np.reshape(z_i, [batch_size, self.gan.encoding_length])
-            loss = self.loss(z_i_reshaped, x)
+            loss = self.compute_loss(z_i_reshaped, x)
 
             return loss
 
@@ -151,7 +147,7 @@ class InverseGAN(Preprocessor):
 
         return y
 
-    def loss(self, z_encoding: np.ndarray, image_adv: np.ndarray) -> np.ndarray:
+    def compute_loss(self, z_encoding: np.ndarray, image_adv: np.ndarray) -> np.ndarray:
         """
         Given a encoding z, computes the loss between the projected sample and the original sample.
 
@@ -163,14 +159,6 @@ class InverseGAN(Preprocessor):
 
         loss = self.sess.run(self._loss, feed_dict={self.gan.input_ph: z_encoding, self._image_adv: image_adv})
         return loss
-
-    @property
-    def apply_fit(self) -> bool:
-        return self._apply_fit
-
-    @property
-    def apply_predict(self) -> bool:
-        return self._apply_predict
 
     def estimate_gradient(self, z_encoding: np.ndarray, y: np.ndarray) -> np.ndarray:
         """
@@ -185,12 +173,6 @@ class InverseGAN(Preprocessor):
 
         gradient = self.sess.run(self._grad, feed_dict={self._image_adv: y, self.gan.input_ph: z_encoding})
         return gradient
-
-    def fit(self, x, y=None, **kwargs):
-        """
-        No parameters to learn for this method; do nothing.
-        """
-        pass
 
     def _check_params(self) -> None:
         if self.inverse_gan is not None and self.gan.encoding_length != self.inverse_gan.encoding_length:

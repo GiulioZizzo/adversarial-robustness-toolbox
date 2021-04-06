@@ -69,6 +69,15 @@ class QueryEfficientBBGradientEstimation(ClassifierWrapper, ClassifierClassLossG
         self.round_samples = round_samples
         self._nb_classes = self.classifier.nb_classes
 
+    @property
+    def input_shape(self) -> Tuple[int, ...]:
+        """
+        Return the shape of one input sample.
+
+        :return: Shape of one input sample.
+        """
+        return self._input_shape  # type: ignore
+
     def predict(self, x: np.ndarray, batch_size: int = 128, **kwargs) -> np.ndarray:
         """
         Perform prediction of the classifier for input `x`.
@@ -149,14 +158,14 @@ class QueryEfficientBBGradientEstimation(ClassifierWrapper, ClassifierClassLossG
                 axis=0,
             )
             grads.append(query_efficient_grad)
-        grads = self._apply_preprocessing_normalization_gradient(np.array(grads))
+        grads = self._apply_preprocessing_gradient(x, np.array(grads))
         return grads
 
     def _wrap_predict(self, x: np.ndarray, batch_size: int = 128) -> np.ndarray:
         """
         Perform prediction for a batch of inputs. Rounds results first.
 
-        :param x: Test set.
+        :param x: Input samples.
         :param batch_size: Size of batches.
         :return: Array of predictions of shape `(nb_inputs, nb_classes)`.
         """
@@ -172,14 +181,6 @@ class QueryEfficientBBGradientEstimation(ClassifierWrapper, ClassifierClassLossG
         :param layer: Layer for computing the activations.
         :param batch_size: Size of batches.
         :return: The output of `layer`, where the first dimension is the batch size corresponding to `x`.
-        """
-        raise NotImplementedError
-
-    def set_learning_phase(self, train: bool) -> None:
-        """
-        Set the learning phase for the backend framework.
-
-        :param train: `True` if the learning phase is training, `False` if learning phase is not training.
         """
         raise NotImplementedError
 

@@ -14,6 +14,18 @@ Backdoor Poisoning Attack
    :members:
    :special-members:
 
+Bullseye Polytope Attack
+---------------------------
+.. autoclass:: BullseyePolytopeAttackPyTorch
+   :members:
+   :special-members:
+
+Clean Label Backdoor Attack
+---------------------------
+.. autoclass:: PoisoningAttackCleanLabelBackdoor
+   :members:
+   :special-members:
+
 Feature Collision Attack
 ------------------------
 .. autoclass:: FeatureCollisionAttack

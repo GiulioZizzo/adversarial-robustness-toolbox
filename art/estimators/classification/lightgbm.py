@@ -24,12 +24,12 @@ from copy import deepcopy
 import logging
 import os
 import pickle
-from typing import List, Optional, Union, TYPE_CHECKING
+from typing import List, Optional, Union, Tuple, TYPE_CHECKING
 
 import numpy as np
 
 from art.estimators.classification.classifier import ClassifierDecisionTree
-from art.config import ART_DATA_PATH
+from art import config
 
 if TYPE_CHECKING:
     # pylint: disable=C0412
@@ -54,7 +54,7 @@ class LightGBMClassifier(ClassifierDecisionTree):
         clip_values: Optional["CLIP_VALUES_TYPE"] = None,
         preprocessing_defences: Union["Preprocessor", List["Preprocessor"], None] = None,
         postprocessing_defences: Union["Postprocessor", List["Postprocessor"], None] = None,
-        preprocessing: "PREPROCESSING_TYPE" = (0, 1),
+        preprocessing: "PREPROCESSING_TYPE" = (0.0, 1.0),
     ) -> None:
         """
         Create a `Classifier` instance from a LightGBM model.
@@ -74,15 +74,24 @@ class LightGBMClassifier(ClassifierDecisionTree):
             raise TypeError("Model must be of type lightgbm.Booster")
 
         super().__init__(
+            model=model,
             clip_values=clip_values,
             preprocessing_defences=preprocessing_defences,
             postprocessing_defences=postprocessing_defences,
             preprocessing=preprocessing,
         )
 
-        self._model = model
         self._input_shape = (self._model.num_feature(),)
         self._nb_classes = self._get_nb_classes()
+
+    @property
+    def input_shape(self) -> Tuple[int, ...]:
+        """
+        Return the shape of one input sample.
+
+        :return: Shape of one input sample.
+        """
+        return self._input_shape  # type: ignore
 
     def fit(self, x: np.ndarray, y: np.ndarray, **kwargs) -> None:
         """
@@ -100,7 +109,7 @@ class LightGBMClassifier(ClassifierDecisionTree):
         """
         Perform prediction for a batch of inputs.
 
-        :param x: Test set.
+        :param x: Input samples.
         :return: Array of predictions of shape `(nb_inputs, nb_classes)`.
         """
         # Apply preprocessing
@@ -132,7 +141,7 @@ class LightGBMClassifier(ClassifierDecisionTree):
                      the default data location of the library `ART_DATA_PATH`.
         """
         if path is None:
-            full_path = os.path.join(ART_DATA_PATH, filename)
+            full_path = os.path.join(config.ART_DATA_PATH, filename)
         else:
             full_path = os.path.join(path, filename)
         folder = os.path.split(full_path)[0]

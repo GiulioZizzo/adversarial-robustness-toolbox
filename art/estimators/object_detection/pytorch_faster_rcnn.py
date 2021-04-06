@@ -25,7 +25,6 @@ import numpy as np
 
 from art.estimators.object_detection.object_detector import ObjectDetectorMixin
 from art.estimators.pytorch import PyTorchEstimator
-from art.utils import Deprecated, deprecated_keyword_arg
 
 if TYPE_CHECKING:
     # pylint: disable=C0412
@@ -44,12 +43,12 @@ class PyTorchFasterRCNN(ObjectDetectorMixin, PyTorchEstimator):
     This class implements a model-specific object detector using Faster-RCNN and PyTorch.
     """
 
-    @deprecated_keyword_arg("channel_index", end_version="1.5.0", replaced_by="channels_first")
+    estimator_params = PyTorchEstimator.estimator_params + ["attack_losses"]
+
     def __init__(
         self,
         model: Optional["torchvision.models.detection.fasterrcnn_resnet50_fpn"] = None,
         clip_values: Optional["CLIP_VALUES_TYPE"] = None,
-        channel_index=Deprecated,
         channels_first: Optional[bool] = None,
         preprocessing_defences: Union["Preprocessor", List["Preprocessor"], None] = None,
         postprocessing_defences: Union["Postprocessor", List["Postprocessor"], None] = None,
@@ -71,8 +70,6 @@ class PyTorchFasterRCNN(ObjectDetectorMixin, PyTorchEstimator):
                maximum values allowed for features. If floats are provided, these will be used as the range of all
                features. If arrays are provided, each value will be considered the bound for a feature, thus
                the shape of clip values needs to match the total number of features.
-        :param channel_index: Index of the axis in data containing the color channels or features.
-        :type channel_index: `int`
         :param channels_first: Set channels first or last.
         :param preprocessing_defences: Preprocessing defence(s) to be applied by the classifier.
         :param postprocessing_defences: Postprocessing defence(s) to be applied by the classifier.
@@ -86,22 +83,16 @@ class PyTorchFasterRCNN(ObjectDetectorMixin, PyTorchEstimator):
         """
         import torch  # lgtm [py/repeated-import]
 
-        # Remove in 1.5.0
-        if channel_index == 3:
-            channels_first = False
-        elif channel_index == 1:
-            channels_first = True
-        elif channel_index is not Deprecated:
-            raise ValueError("Not a proper channel_index. Use channels_first.")
-
         super().__init__(
+            model=model,
             clip_values=clip_values,
-            channel_index=channel_index,
             channels_first=channels_first,
             preprocessing_defences=preprocessing_defences,
             postprocessing_defences=postprocessing_defences,
             preprocessing=preprocessing,
         )
+
+        self._input_shape = None
 
         if self.clip_values is not None:
             if self.clip_values[0] != 0:
@@ -109,7 +100,7 @@ class PyTorchFasterRCNN(ObjectDetectorMixin, PyTorchEstimator):
             if self.clip_values[1] <= 0:
                 raise ValueError("This classifier requires un-normalized input images with clip_vales=(0, max_value).")
 
-        if self.preprocessing is not None:
+        if preprocessing is not None:
             raise ValueError("This estimator does not support `preprocessing`.")
         if self.postprocessing_defences is not None:
             raise ValueError("This estimator does not support `postprocessing_defences`.")
@@ -135,6 +126,24 @@ class PyTorchFasterRCNN(ObjectDetectorMixin, PyTorchEstimator):
         self._model.eval()
         self.attack_losses: Tuple[str, ...] = attack_losses
 
+    @property
+    def input_shape(self) -> Tuple[int, ...]:
+        """
+        Return the shape of one input sample.
+
+        :return: Shape of one input sample.
+        """
+        return self._input_shape  # type: ignore
+
+    @property
+    def device(self) -> "torch.device":
+        """
+        Get current used device.
+
+        :return: Current used device.
+        """
+        return self._device
+
     def loss_gradient(
         self, x: np.ndarray, y: Union[List[Dict[str, np.ndarray]], List[Dict[str, "torch.Tensor"]]], **kwargs
     ) -> np.ndarray:
@@ -157,26 +166,76 @@ class PyTorchFasterRCNN(ObjectDetectorMixin, PyTorchEstimator):
         self._model.train()
 
         # Apply preprocessing
-        x, _ = self._apply_preprocessing(x, y=None, fit=False)
+        if self.all_framework_preprocessing:
+            if isinstance(x, torch.Tensor):
+                raise NotImplementedError
 
-        if y is not None and isinstance(y[0]["boxes"], np.ndarray):
-            for i, y_i in enumerate(y):
-                y[i]["boxes"] = torch.from_numpy(y_i["boxes"]).type(torch.float).to(self._device)
-                y[i]["labels"] = torch.from_numpy(y_i["labels"]).type(torch.int64).to(self._device)
-                y[i]["scores"] = torch.from_numpy(y_i["scores"]).to(self._device)
-
-        transform = torchvision.transforms.Compose([torchvision.transforms.ToTensor()])
-        image_tensor_list = list()
-
-        for i in range(x.shape[0]):
-            if self.clip_values is not None:
-                img = transform(x[i] / self.clip_values[1]).to(self._device)
+            if y is not None and isinstance(y[0]["boxes"], np.ndarray):
+                y_tensor = list()
+                for i, y_i in enumerate(y):
+                    y_t = dict()
+                    y_t["boxes"] = torch.from_numpy(y_i["boxes"]).type(torch.float).to(self._device)
+                    y_t["labels"] = torch.from_numpy(y_i["labels"]).type(torch.int64).to(self._device)
+                    y_t["scores"] = torch.from_numpy(y_i["scores"]).to(self._device)
+                    y_tensor.append(y_t)
             else:
-                img = transform(x[i]).to(self._device)
-            img.requires_grad = True
-            image_tensor_list.append(img)
+                y_tensor = y
 
-        output = self._model(image_tensor_list, y)
+            transform = torchvision.transforms.Compose([torchvision.transforms.ToTensor()])
+            image_tensor_list_grad = list()
+            y_preprocessed = list()
+            inputs_t = list()
+
+            for i in range(x.shape[0]):
+                if self.clip_values is not None:
+                    x_grad = transform(x[i] / self.clip_values[1]).to(self._device)
+                else:
+                    x_grad = transform(x[i]).to(self._device)
+                x_grad.requires_grad = True
+                image_tensor_list_grad.append(x_grad)
+                x_grad_1 = torch.unsqueeze(x_grad, dim=0)
+                x_preprocessed_i, y_preprocessed_i = self._apply_preprocessing(
+                    x_grad_1, y=[y_tensor[i]], fit=False, no_grad=False
+                )
+                x_preprocessed_i = torch.squeeze(x_preprocessed_i)
+                y_preprocessed.append(y_preprocessed_i[0])
+                inputs_t.append(x_preprocessed_i)
+
+        elif isinstance(x, np.ndarray):
+            x_preprocessed, y_preprocessed = self._apply_preprocessing(x, y=y, fit=False, no_grad=True)
+
+            if y_preprocessed is not None and isinstance(y_preprocessed[0]["boxes"], np.ndarray):
+                y_preprocessed_tensor = list()
+                for i, y_i in enumerate(y_preprocessed):
+                    y_preprocessed_t = dict()
+                    y_preprocessed_t["boxes"] = torch.from_numpy(y_i["boxes"]).type(torch.float).to(self._device)
+                    y_preprocessed_t["labels"] = torch.from_numpy(y_i["labels"]).type(torch.int64).to(self._device)
+                    y_preprocessed_t["scores"] = torch.from_numpy(y_i["scores"]).to(self._device)
+                    y_preprocessed_tensor.append(y_preprocessed_t)
+                y_preprocessed = y_preprocessed_tensor
+
+            transform = torchvision.transforms.Compose([torchvision.transforms.ToTensor()])
+            image_tensor_list_grad = list()
+
+            for i in range(x_preprocessed.shape[0]):
+                if self.clip_values is not None:
+                    x_grad = transform(x_preprocessed[i] / self.clip_values[1]).to(self._device)
+                else:
+                    x_grad = transform(x_preprocessed[i]).to(self._device)
+                x_grad.requires_grad = True
+                image_tensor_list_grad.append(x_grad)
+
+            inputs_t = image_tensor_list_grad
+
+        else:
+            raise NotImplementedError("Combination of inputs and preprocessing not supported.")
+
+        if isinstance(y_preprocessed, np.ndarray):
+            labels_t = torch.from_numpy(y_preprocessed).to(self._device)
+        else:
+            labels_t = y_preprocessed
+
+        output = self._model(inputs_t, labels_t)
 
         # Compute the gradient and return
         loss = None
@@ -193,20 +252,26 @@ class PyTorchFasterRCNN(ObjectDetectorMixin, PyTorchEstimator):
         loss.backward(retain_graph=True)  # type: ignore
 
         grad_list = list()
-        for img in image_tensor_list:
-            gradients = img.grad.cpu().numpy().copy()
-            grad_list.append(gradients)
+        if isinstance(x, np.ndarray):
+            for img in image_tensor_list_grad:
+                gradients = img.grad.cpu().numpy().copy()
+                grad_list.append(gradients)
+            grads = np.stack(grad_list, axis=0)
+        else:
+            for img in inputs_t:
+                gradients = img.grad.copy()
+                grad_list.append(gradients)
+            grads = torch.stack(grad_list, dim=0)
 
-        grads = np.stack(grad_list, axis=0)
-
-        # BB
-        grads = self._apply_preprocessing_gradient(x, grads)
-        grads = np.swapaxes(grads, 1, 3)
-        grads = np.swapaxes(grads, 1, 2)
-        assert grads.shape == x.shape
+        grads = np.transpose(grads, (0, 2, 3, 1))
 
         if self.clip_values is not None:
             grads = grads / self.clip_values[1]
+
+        if not self.all_framework_preprocessing:
+            grads = self._apply_preprocessing_gradient(x, grads)
+
+        assert grads.shape == x.shape
 
         return grads
 
@@ -242,7 +307,7 @@ class PyTorchFasterRCNN(ObjectDetectorMixin, PyTorchEstimator):
             image_tensor_list.append(transform(x[i] / norm_factor).to(self._device))
         predictions = self._model(image_tensor_list)
 
-        for i_prediction in range(len(predictions)):
+        for i_prediction, _ in enumerate(predictions):
             predictions[i_prediction]["boxes"] = predictions[i_prediction]["boxes"].detach().cpu().numpy()
             predictions[i_prediction]["labels"] = predictions[i_prediction]["labels"].detach().cpu().numpy()
             predictions[i_prediction]["scores"] = predictions[i_prediction]["scores"].detach().cpu().numpy()
@@ -257,10 +322,7 @@ class PyTorchFasterRCNN(ObjectDetectorMixin, PyTorchEstimator):
     ) -> np.ndarray:
         raise NotImplementedError
 
-    def set_learning_phase(self, train: bool) -> None:
-        raise NotImplementedError
-
-    def loss(self, x: np.ndarray, y: np.ndarray, **kwargs) -> np.ndarray:
+    def compute_loss(self, x: np.ndarray, y: np.ndarray, **kwargs) -> np.ndarray:
         """
         Compute the loss of the neural network for samples `x`.
 

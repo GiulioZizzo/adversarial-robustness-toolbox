@@ -23,7 +23,7 @@ from typing import Any, Tuple, TYPE_CHECKING
 
 import numpy as np
 
-from art.utils import ART_NUMPY_DTYPE
+from art import config
 from art.estimators.estimator import (
     BaseEstimator,
     LossGradientsMixin,
@@ -40,6 +40,8 @@ class TensorFlowEstimator(NeuralNetworkMixin, LossGradientsMixin, BaseEstimator)
     """
     Estimator class for TensorFlow models.
     """
+
+    estimator_params = BaseEstimator.estimator_params + NeuralNetworkMixin.estimator_params
 
     def __init__(self, **kwargs) -> None:
         """
@@ -58,7 +60,7 @@ class TensorFlowEstimator(NeuralNetworkMixin, LossGradientsMixin, BaseEstimator)
         :return: Predictions.
         :rtype: Format as expected by the `model`
         """
-        return NeuralNetworkMixin.predict(self, x, batch_size=128, **kwargs)
+        return NeuralNetworkMixin.predict(self, x, batch_size=batch_size, **kwargs)
 
     def fit(self, x: np.ndarray, y, batch_size: int = 128, nb_epochs: int = 20, **kwargs) -> None:
         """
@@ -71,7 +73,7 @@ class TensorFlowEstimator(NeuralNetworkMixin, LossGradientsMixin, BaseEstimator)
         :param batch_size: Batch size.
         :param nb_epochs: Number of training epochs.
         """
-        NeuralNetworkMixin.fit(self, x, y, batch_size=128, nb_epochs=20, **kwargs)
+        NeuralNetworkMixin.fit(self, x, y, batch_size=batch_size, nb_epochs=nb_epochs, **kwargs)
 
     @property
     def sess(self) -> "tf.python.client.session.Session":
@@ -82,21 +84,8 @@ class TensorFlowEstimator(NeuralNetworkMixin, LossGradientsMixin, BaseEstimator)
         """
         if self._sess is not None:
             return self._sess
-        else:
-            raise NotImplementedError("A valid TensorFlow session is not available.")
 
-    def loss(self, x: np.ndarray, y: np.ndarray, **kwargs) -> np.ndarray:
-        """
-        Compute the loss of the neural network for samples `x`.
-
-        :param x: Samples of shape (nb_samples, nb_features) or (nb_samples, nb_pixels_1, nb_pixels_2,
-                  nb_channels) or (nb_samples, nb_channels, nb_pixels_1, nb_pixels_2).
-        :param y: Target values (class labels) one-hot-encoded of shape `(nb_samples, nb_classes)` or indices
-                  of shape `(nb_samples,)`.
-        :return: Loss values.
-        :rtype: Format as expected by the `model`
-        """
-        raise NotImplementedError
+        raise NotImplementedError("A valid TensorFlow session is not available.")
 
 
 class TensorFlowV2Estimator(NeuralNetworkMixin, LossGradientsMixin, BaseEstimator):
@@ -104,11 +93,20 @@ class TensorFlowV2Estimator(NeuralNetworkMixin, LossGradientsMixin, BaseEstimato
     Estimator class for TensorFlow v2 models.
     """
 
+    estimator_params = BaseEstimator.estimator_params + NeuralNetworkMixin.estimator_params
+
     def __init__(self, **kwargs):
         """
         Estimator class for TensorFlow v2 models.
         """
+        preprocessing = kwargs.get("preprocessing")
+        if isinstance(preprocessing, tuple):
+            from art.preprocessing.standardisation_mean_std.tensorflow import StandardisationMeanStdTensorFlow
+
+            kwargs["preprocessing"] = StandardisationMeanStdTensorFlow(mean=preprocessing[0], std=preprocessing[1])
+
         super().__init__(**kwargs)
+        TensorFlowV2Estimator._check_params(self)
 
     def predict(self, x: np.ndarray, batch_size: int = 128, **kwargs):
         """
@@ -120,7 +118,7 @@ class TensorFlowV2Estimator(NeuralNetworkMixin, LossGradientsMixin, BaseEstimato
         :return: Predictions.
         :rtype: Format as expected by the `model`
         """
-        return NeuralNetworkMixin.predict(self, x, batch_size=128, **kwargs)
+        return NeuralNetworkMixin.predict(self, x, batch_size=batch_size, **kwargs)
 
     def fit(self, x: np.ndarray, y, batch_size: int = 128, nb_epochs: int = 20, **kwargs) -> None:
         """
@@ -133,27 +131,31 @@ class TensorFlowV2Estimator(NeuralNetworkMixin, LossGradientsMixin, BaseEstimato
         :param batch_size: Batch size.
         :param nb_epochs: Number of training epochs.
         """
-        NeuralNetworkMixin.fit(self, x, y, batch_size=128, nb_epochs=20, **kwargs)
+        NeuralNetworkMixin.fit(self, x, y, batch_size=batch_size, nb_epochs=nb_epochs, **kwargs)
 
-    def loss(self, x: np.ndarray, y: np.ndarray, **kwargs) -> np.ndarray:
+    def set_params(self, **kwargs) -> None:
         """
-        Compute the loss of the neural network for samples `x`.
+        Take a dictionary of parameters and apply checks before setting them as attributes.
 
-        :param x: Samples of shape (nb_samples, nb_features) or (nb_samples, nb_pixels_1, nb_pixels_2,
-                  nb_channels) or (nb_samples, nb_channels, nb_pixels_1, nb_pixels_2).
-        :param y: Target values (class labels) one-hot-encoded of shape `(nb_samples, nb_classes)` or indices
-                  of shape `(nb_samples,)`.
-        :return: Loss values.
-        :rtype: Format as expected by the `model`
+        :param kwargs: A dictionary of attributes.
         """
-        raise NotImplementedError
+        super().set_params(**kwargs)
+        self._check_params()
 
-    def _apply_preprocessing_defences(self, x, y, fit: bool = False) -> Tuple[Any, Any]:
+    def _check_params(self) -> None:
+        from art.defences.preprocessor.preprocessor import PreprocessorTensorFlowV2
+
+        super()._check_params()
+        self.all_framework_preprocessing = all(
+            [isinstance(p, PreprocessorTensorFlowV2) for p in self.preprocessing_operations]
+        )
+
+    def _apply_preprocessing(self, x, y, fit: bool = False) -> Tuple[Any, Any]:
         """
         Apply all preprocessing defences of the estimator on the raw inputs `x` and `y`. This function is should
         only be called from function `_apply_preprocessing`.
 
-        The method overrides art.estimators.estimator::BaseEstimator._apply_preprocessing_defences().
+        The method overrides art.estimators.estimator::BaseEstimator._apply_preprocessing().
         It requires all defenses to have a method `forward()`.
         It converts numpy arrays to TensorFlow tensors first, then chains a series of defenses by calling
         defence.forward() which contains TensorFlow operations. At the end, it converts TensorFlow tensors
@@ -169,52 +171,57 @@ class TensorFlowV2Estimator(NeuralNetworkMixin, LossGradientsMixin, BaseEstimato
         :rtype: Format as expected by the `model`
         """
         import tensorflow as tf  # lgtm [py/repeated-import]
-        from art.defences.preprocessor.preprocessor import PreprocessorTensorFlowV2
+        from art.preprocessing.standardisation_mean_std.numpy import StandardisationMeanStd
+        from art.preprocessing.standardisation_mean_std.tensorflow import StandardisationMeanStdTensorFlow
 
-        if (
-            not hasattr(self, "preprocessing_defences")
-            or self.preprocessing_defences is None
-            or len(self.preprocessing_defences) == 0
-        ):
+        if not self.preprocessing_operations:
             return x, y
 
-        if len(self.preprocessing_defences) == 1:
-            # Compatible with non-TensorFlow defences if no chaining.
-            defence = self.preprocessing_defences[0]
-            x, y = defence(x, y)
-        else:
-            # Check if all defences are implemented in TensorFlow.
-            for defence in self.preprocessing_defences:
-                if not isinstance(defence, PreprocessorTensorFlowV2):
-                    raise NotImplementedError(f"{defence.__class__} is not TensorFlow-specific.")
+        input_is_tensor = isinstance(x, tf.Tensor)
 
+        if self.all_framework_preprocessing and not (not input_is_tensor and x.dtype == np.object):
             # Convert np arrays to torch tensors.
-            x = tf.convert_to_tensor(x)
-            if y is not None:
-                y = tf.convert_to_tensor(y)
+            if not input_is_tensor:
+                x = tf.convert_to_tensor(x)
+                if y is not None:
+                    y = tf.convert_to_tensor(y)
 
-            for defence in self.preprocessing_defences:
+            for preprocess in self.preprocessing_operations:
                 if fit:
-                    if defence.apply_fit:
-                        x, y = defence.forward(x, y)
+                    if preprocess.apply_fit:
+                        x, y = preprocess.forward(x, y)
                 else:
-                    if defence.apply_predict:
-                        x, y = defence.forward(x, y)
+                    if preprocess.apply_predict:
+                        x, y = preprocess.forward(x, y)
 
             # Convert torch tensors back to np arrays.
-            x = x.numpy()
-            if y is not None:
-                y = y.numpy()
+            if not input_is_tensor:
+                x = x.numpy()
+                if y is not None:
+                    y = y.numpy()
+
+        elif len(self.preprocessing_operations) == 1 or (
+            len(self.preprocessing_operations) == 2
+            and isinstance(
+                self.preprocessing_operations[-1], (StandardisationMeanStd, StandardisationMeanStdTensorFlow)
+            )
+        ):
+            # Compatible with non-TensorFlow defences if no chaining.
+            for preprocess in self.preprocessing_operations:
+                x, y = preprocess(x, y)
+
+        else:
+            raise NotImplementedError("The current combination of preprocessing types is not supported.")
 
         return x, y
 
-    def _apply_preprocessing_defences_gradient(self, x, gradients, fit=False):
+    def _apply_preprocessing_gradient(self, x, gradients, fit=False):
         """
         Apply the backward pass to the gradients through all preprocessing defences that have been applied to `x`
         and `y` in the forward pass. This function is should only be called from function
         `_apply_preprocessing_gradient`.
 
-        The method overrides art.estimators.estimator::LossGradientsMixin._apply_preprocessing_defences_gradient().
+        The method overrides art.estimators.estimator::LossGradientsMixin._apply_preprocessing_gradient().
         It requires all defenses to have a method estimate_forward().
         It converts numpy arrays to TensorFlow tensors first, then chains a series of defenses by calling
         defence.estimate_forward() which contains differentiable estimate of the operations. At the end,
@@ -229,39 +236,29 @@ class TensorFlowV2Estimator(NeuralNetworkMixin, LossGradientsMixin, BaseEstimato
         :rtype: Format as expected by the `model`
         """
         import tensorflow as tf  # lgtm [py/repeated-import]
-        from art.defences.preprocessor.preprocessor import PreprocessorTensorFlowV2
+        from art.preprocessing.standardisation_mean_std.numpy import StandardisationMeanStd
+        from art.preprocessing.standardisation_mean_std.tensorflow import StandardisationMeanStdTensorFlow
 
-        if (
-            not hasattr(self, "preprocessing_defences")
-            or self.preprocessing_defences is None
-            or len(self.preprocessing_defences) == 0
-        ):
+        if not self.preprocessing_operations:
             return gradients
 
-        if len(self.preprocessing_defences) == 1:
-            # Compatible with non-TensorFlow defences if no chaining.
-            defence = self.preprocessing_defences[0]
-            gradients = defence.estimate_gradient(x, gradients)
-        else:
-            # Check if all defences are implemented in TensorFlow.
-            for defence in self.preprocessing_defences:
-                if not isinstance(defence, PreprocessorTensorFlowV2):
-                    raise NotImplementedError(f"{defence.__class__} is not TensorFlowV2-specific.")
+        input_is_tensor = isinstance(x, tf.Tensor)
 
+        if self.all_framework_preprocessing and not (not input_is_tensor and x.dtype == np.object):
             with tf.GradientTape() as tape:
                 # Convert np arrays to TensorFlow tensors.
-                x = tf.convert_to_tensor(x, dtype=ART_NUMPY_DTYPE)
+                x = tf.convert_to_tensor(x, dtype=config.ART_NUMPY_DTYPE)
                 tape.watch(x)
-                gradients = tf.convert_to_tensor(gradients, dtype=ART_NUMPY_DTYPE)
+                gradients = tf.convert_to_tensor(gradients, dtype=config.ART_NUMPY_DTYPE)
                 x_orig = x
 
-                for defence in self.preprocessing_defences:
+                for preprocess in self.preprocessing_operations:
                     if fit:
-                        if defence.apply_fit:
-                            x = defence.estimate_forward(x)
+                        if preprocess.apply_fit:
+                            x = preprocess.estimate_forward(x)
                     else:
-                        if defence.apply_predict:
-                            x = defence.estimate_forward(x)
+                        if preprocess.apply_predict:
+                            x = preprocess.estimate_forward(x)
 
             x_grad = tape.gradient(target=x, sources=x_orig, output_gradients=gradients)
 
@@ -271,4 +268,23 @@ class TensorFlowV2Estimator(NeuralNetworkMixin, LossGradientsMixin, BaseEstimato
                 raise ValueError(
                     "The input shape is {} while the gradient shape is {}".format(x.shape, gradients.shape)
                 )
+
+        elif len(self.preprocessing_operations) == 1 or (
+            len(self.preprocessing_operations) == 2
+            and isinstance(
+                self.preprocessing_operations[-1], (StandardisationMeanStd, StandardisationMeanStdTensorFlow)
+            )
+        ):
+            # Compatible with non-TensorFlow defences if no chaining.
+            for preprocess in self.preprocessing_operations[::-1]:
+                if fit:
+                    if preprocess.apply_fit:
+                        gradients = preprocess.estimate_gradient(x, gradients)
+                else:
+                    if preprocess.apply_predict:
+                        gradients = preprocess.estimate_gradient(x, gradients)
+
+        else:
+            raise NotImplementedError("The current combination of preprocessing types is not supported.")
+
         return gradients

@@ -22,10 +22,9 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
 
 import numpy as np
-from tqdm import trange
+from tqdm.auto import trange
 
 from art.config import ART_NUMPY_DTYPE
-from art.utils import Deprecated, deprecated, deprecated_keyword_arg
 
 if TYPE_CHECKING:
     # pylint: disable=R0401
@@ -52,11 +51,11 @@ class BaseEstimator(ABC):
 
     def __init__(
         self,
-        model=None,
-        clip_values: Optional["CLIP_VALUES_TYPE"] = None,
+        model,
+        clip_values: Optional["CLIP_VALUES_TYPE"],
         preprocessing_defences: Union["Preprocessor", List["Preprocessor"], None] = None,
         postprocessing_defences: Union["Postprocessor", List["Postprocessor"], None] = None,
-        preprocessing: "PREPROCESSING_TYPE" = (0, 1),
+        preprocessing: Union["PREPROCESSING_TYPE", "Preprocessor"] = (0.0, 1.0),
     ):
         """
         Initialize a `BaseEstimator` object.
@@ -72,26 +71,79 @@ class BaseEstimator(ABC):
                used for data preprocessing. The first value will be subtracted from the input and the results will be
                divided by the second value.
         """
-        from art.defences.postprocessor.postprocessor import Postprocessor
-        from art.defences.preprocessor.preprocessor import Preprocessor
-
         self._model = model
         self._clip_values = clip_values
 
-        self.preprocessing_defences: Optional[List["Preprocessor"]]
+        self.preprocessing = self._set_preprocessing(preprocessing)
+        self.preprocessing_defences = self._set_preprocessing_defences(preprocessing_defences)
+        self.postprocessing_defences = self._set_postprocessing_defences(postprocessing_defences)
+        self.preprocessing_operations: List["Preprocessor"] = []
+        BaseEstimator._update_preprocessing_operations(self)
+        BaseEstimator._check_params(self)
+
+    def _update_preprocessing_operations(self):
+        from art.defences.preprocessor.preprocessor import Preprocessor
+
+        self.preprocessing_operations.clear()
+
+        if self.preprocessing_defences is None:
+            pass
+        elif isinstance(self.preprocessing_defences, Preprocessor):
+            self.preprocessing_operations.append(self.preprocessing_defences)
+        else:
+            self.preprocessing_operations += self.preprocessing_defences
+
+        if self.preprocessing is None:
+            pass
+        elif isinstance(self.preprocessing, tuple):
+            from art.preprocessing.standardisation_mean_std.numpy import StandardisationMeanStd
+
+            self.preprocessing_operations.append(
+                StandardisationMeanStd(mean=self.preprocessing[0], std=self.preprocessing[1])
+            )
+        elif isinstance(self.preprocessing, Preprocessor):
+            self.preprocessing_operations.append(self.preprocessing)
+        else:
+            raise ValueError("Preprocessing argument not recognised.")
+
+    @staticmethod
+    def _set_preprocessing(
+        preprocessing: Optional[Union["PREPROCESSING_TYPE", "Preprocessor"]]
+    ) -> Optional["Preprocessor"]:
+        from art.defences.preprocessor.preprocessor import Preprocessor
+
+        if preprocessing is None:
+            return None
+        if isinstance(preprocessing, tuple):
+            from art.preprocessing.standardisation_mean_std.numpy import StandardisationMeanStd
+
+            return StandardisationMeanStd(mean=preprocessing[0], std=preprocessing[1])
+        if isinstance(preprocessing, Preprocessor):
+            return preprocessing
+
+        raise ValueError("Preprocessing argument not recognised.")
+
+    @staticmethod
+    def _set_preprocessing_defences(
+        preprocessing_defences: Optional[Union["Preprocessor", List["Preprocessor"]]]
+    ) -> Optional[List["Preprocessor"]]:
+        from art.defences.preprocessor.preprocessor import Preprocessor
+
         if isinstance(preprocessing_defences, Preprocessor):
-            self.preprocessing_defences = [preprocessing_defences]
-        else:
-            self.preprocessing_defences = preprocessing_defences
+            return [preprocessing_defences]
 
-        self.postprocessing_defences: Optional[List["Postprocessor"]]
+        return preprocessing_defences
+
+    @staticmethod
+    def _set_postprocessing_defences(
+        postprocessing_defences: Optional[Union["Postprocessor", List["Postprocessor"]]]
+    ) -> Optional[List["Postprocessor"]]:
+        from art.defences.postprocessor.postprocessor import Postprocessor
+
         if isinstance(postprocessing_defences, Postprocessor):
-            self.postprocessing_defences = [postprocessing_defences]
-        else:
-            self.postprocessing_defences = postprocessing_defences
+            return [postprocessing_defences]
 
-        self.preprocessing = preprocessing
-        self._check_params()
+        return postprocessing_defences
 
     def set_params(self, **kwargs) -> None:
         """
@@ -104,9 +156,17 @@ class BaseEstimator(ABC):
                 if hasattr(BaseEstimator, key) and isinstance(getattr(BaseEstimator, key), property):
                     setattr(self, "_" + key, value)
                 else:
-                    setattr(self, key, value)
+                    if key == "preprocessing":
+                        setattr(self, key, self._set_preprocessing(value))
+                    elif key == "preprocessing_defences":
+                        setattr(self, key, self._set_preprocessing_defences(value))
+                    elif key == "postprocessing_defences":
+                        setattr(self, key, self._set_postprocessing_defences(value))
+                    else:
+                        setattr(self, key, value)
             else:
-                raise ValueError("Unexpected parameter {} found in kwargs.".format(key))
+                raise ValueError("Unexpected parameter `{}` found in kwargs.".format(key))
+        self._update_preprocessing_operations()
         self._check_params()
 
     def get_params(self) -> Dict[str, Any]:
@@ -137,20 +197,19 @@ class BaseEstimator(ABC):
             else:
                 self._clip_values = np.array(self._clip_values, dtype=ART_NUMPY_DTYPE)
 
-        if isinstance(self.preprocessing_defences, list):
-            for preproc_defence in self.preprocessing_defences:
-                if not isinstance(preproc_defence, Preprocessor):
+        if isinstance(self.preprocessing_operations, list):
+            for preprocess in self.preprocessing_operations:
+                if not isinstance(preprocess, Preprocessor):
                     raise ValueError(
                         "All preprocessing defences have to be instance of "
                         "art.defences.preprocessor.preprocessor.Preprocessor."
                     )
-        elif self.preprocessing_defences is None:
-            pass
         else:
             raise ValueError(
                 "All preprocessing defences have to be instance of "
                 "art.defences.preprocessor.preprocessor.Preprocessor."
             )
+
         if isinstance(self.postprocessing_defences, list):
             for postproc_defence in self.postprocessing_defences:
                 if not isinstance(postproc_defence, Postprocessor):
@@ -164,11 +223,6 @@ class BaseEstimator(ABC):
             raise ValueError(
                 "All postprocessing defences have to be instance of "
                 "art.defences.postprocessor.postprocessor.Postprocessor."
-            )
-
-        if self.preprocessing is not None and len(self.preprocessing) != 2:
-            raise ValueError(
-                "`preprocessing` should be a tuple of 2 floats with the values to subtract and divide the model inputs."
             )
 
     @abstractmethod
@@ -205,13 +259,14 @@ class BaseEstimator(ABC):
         return self._model
 
     @property
+    @abstractmethod
     def input_shape(self) -> Tuple[int, ...]:
         """
         Return the shape of one input sample.
 
         :return: Shape of one input sample.
         """
-        return self._input_shape  # type: ignore
+        raise NotImplementedError
 
     @property
     def clip_values(self) -> Optional["CLIP_VALUES_TYPE"]:
@@ -235,67 +290,16 @@ class BaseEstimator(ABC):
         :return: Tuple of `x` and `y` after applying the defences and standardisation.
         :rtype: Format as expected by the `model`
         """
-        # y = check_and_transform_label_format(y, self.nb_classes)
-        x_preprocessed, y_preprocessed = self._apply_preprocessing_defences(x, y, fit=fit)
-        x_preprocessed = self._apply_preprocessing_standardisation(x_preprocessed)
-        return x_preprocessed, y_preprocessed
-
-    def _apply_preprocessing_defences(self, x, y, fit: bool = False) -> Tuple[Any, Any]:
-        """
-        Apply all preprocessing defences of the estimator on the raw inputs `x` and `y`. This function is should
-        only be called from function `_apply_preprocessing`.
-
-        :param x: Samples.
-        :type x: Format as expected by the `model`
-        :param y: Target values.
-        :type y: Format as expected by the `model`
-        :param fit: `True` if the function is call before fit/training and `False` if the function is called before a
-                    predict operation.
-        :return: Tuple of `x` and `y` after applying the defences and standardisation.
-        :rtype: Format as expected by the `model`
-        """
-        if self.preprocessing_defences is not None:
-            for defence in self.preprocessing_defences:
+        if self.preprocessing_operations:
+            for preprocess in self.preprocessing_operations:
                 if fit:
-                    if defence.apply_fit:
-                        x, y = defence(x, y)
+                    if preprocess.apply_fit:
+                        x, y = preprocess(x, y)
                 else:
-                    if defence.apply_predict:
-                        x, y = defence(x, y)
+                    if preprocess.apply_predict:
+                        x, y = preprocess(x, y)
 
         return x, y
-
-    def _apply_preprocessing_standardisation(self, x):
-        """
-        Apply standardisation to input data `x`.
-
-        :param x: Samples.
-        :type x: Format as expected by the `model`
-        :return: Standardized `x`.
-        :rtype: Format as expected by the `model`
-        :raises `TypeError`: If the input data type is unsigned.
-        """
-        if x.dtype in [np.uint8, np.uint16, np.uint32, np.uint64]:
-            raise TypeError(
-                "The data type of input data `x` is {} and cannot represent negative values. Consider "
-                "changing the data type of the input data `x` to a type that supports negative values e.g. "
-                "np.float32.".format(x.dtype)
-            )
-
-        if self.preprocessing is not None:
-            sub, div = self.preprocessing
-
-            if isinstance(x, np.ndarray):
-                sub = np.asarray(sub, dtype=x.dtype)
-                div = np.asarray(div, dtype=x.dtype)
-
-            res = x - sub
-            res = res / div
-
-        else:
-            res = x
-
-        return res
 
     def _apply_postprocessing(self, preds, fit: bool) -> np.ndarray:
         """
@@ -321,9 +325,9 @@ class BaseEstimator(ABC):
     def __repr__(self):
         class_name = self.__class__.__name__
         attributes = {}
-        for k, v in self.__dict__.items():
+        for k, value in self.__dict__.items():
             k = k[1:] if k[0] == "_" else k
-            attributes[k] = v
+            attributes[k] = value
         attributes = ["{}={}".format(k, v) for k, v in attributes.items()]
         repr_string = class_name + "(" + ", ".join(attributes) + ")"
         return repr_string
@@ -350,7 +354,7 @@ class LossGradientsMixin(ABC):
         """
         raise NotImplementedError
 
-    def _apply_preprocessing_gradient(self, x, gradients):
+    def _apply_preprocessing_gradient(self, x, gradients, fit=False):
         """
         Apply the backward pass to the gradients through all normalization and preprocessing defences that have been
         applied to `x` and `y` in the forward pass. This function has to be applied to all gradients w.r.t. `x`
@@ -363,54 +367,16 @@ class LossGradientsMixin(ABC):
         :return: Gradients after backward pass through normalization and preprocessing defences.
         :rtype: Format as expected by the `model`
         """
-        gradients = self._apply_preprocessing_normalization_gradient(gradients)
-        gradients = self._apply_preprocessing_defences_gradient(x, gradients)
-        return gradients
-
-    def _apply_preprocessing_defences_gradient(self, x, gradients, fit=False):
-        """
-        Apply the backward pass to the gradients through all preprocessing defences that have been applied to `x`
-        and `y` in the forward pass. This function is should only be called from function
-        `_apply_preprocessing_gradient`.
-
-        :param x: Samples.
-        :type x: Format as expected by the `model`
-        :param gradients: Gradients before backward pass through preprocessing defences.
-        :type gradients: Format as expected by the `model`
-        :param fit: `True` if the gradients are computed during training.
-        :return: Gradients after backward pass through preprocessing defences.
-        :rtype: Format as expected by the `model`
-        """
-        if hasattr(self, "preprocessing_defences") and self.preprocessing_defences is not None:
-            for defence in self.preprocessing_defences[::-1]:
+        if self.preprocessing_operations:
+            for preprocess in self.preprocessing_operations[::-1]:
                 if fit:
-                    if defence.apply_fit:
-                        gradients = defence.estimate_gradient(x, gradients)
+                    if preprocess.apply_fit:
+                        gradients = preprocess.estimate_gradient(x, gradients)
                 else:
-                    if defence.apply_predict:
-                        gradients = defence.estimate_gradient(x, gradients)
+                    if preprocess.apply_predict:
+                        gradients = preprocess.estimate_gradient(x, gradients)
 
         return gradients
-
-    def _apply_preprocessing_normalization_gradient(self, gradients):
-        """
-        Apply the backward pass through standardisation of `x` to `gradients`.
-
-        Apply the backward pass to the gradients through normalization that has been applied to `x` in the forward
-        pass. This function is should only be called from function `_apply_preprocessing_gradient`.
-
-        :param gradients: Gradients before backward pass through normalization.
-        :type gradients: Format as expected by the `model`
-        :return: Gradients after backward pass through normalization.
-        """
-        if hasattr(self, "preprocessing") and self.preprocessing is not None:
-            _, div = self.preprocessing
-            div = np.asarray(div, dtype=gradients.dtype)
-            res = gradients / div
-        else:
-            res = gradients
-
-        return res
 
 
 class NeuralNetworkMixin(ABC):
@@ -419,24 +385,14 @@ class NeuralNetworkMixin(ABC):
     has to be mixed in with class `BaseEstimator`.
     """
 
-    @deprecated_keyword_arg("channel_index", end_version="1.5.0", replaced_by="channels_first")
-    def __init__(self, channel_index=Deprecated, channels_first: Optional[bool] = None, **kwargs) -> None:
+    estimator_params = ["channels_first"]
+
+    def __init__(self, channels_first: Optional[bool], **kwargs) -> None:
         """
         Initialize a neural network attributes.
 
-        :param channel_index: Index of the axis in samples `x` representing the color channels.
-        :type channel_index: `int`
         :param channels_first: Set channels first or last.
         """
-        # Remove in 1.5.0
-        if channel_index == 3:
-            channels_first = False
-        elif channel_index == 1:
-            channels_first = True
-        elif channel_index is not Deprecated:
-            raise ValueError("Not a proper channel_index. Use channels_first.")
-
-        self._channel_index = channel_index
         self._channels_first: Optional[bool] = channels_first
         super().__init__(**kwargs)
 
@@ -445,8 +401,7 @@ class NeuralNetworkMixin(ABC):
         """
         Perform prediction of the neural network for samples `x`.
 
-        :param x: Samples of shape (nb_samples, nb_features) or (nb_samples, nb_pixels_1, nb_pixels_2,
-                  nb_channels) or (nb_samples, nb_channels, nb_pixels_1, nb_pixels_2).
+        :param x: Input samples.
         :param batch_size: Batch size.
         :return: Predictions.
         :rtype: Format as expected by the `model`
@@ -512,16 +467,7 @@ class NeuralNetworkMixin(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def set_learning_phase(self, train: bool) -> None:
-        """
-        Set the learning phase for the backend framework.
-
-        :param train: `True` if the learning phase is training, otherwise `False`.
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    def loss(self, x: np.ndarray, y: np.ndarray, **kwargs) -> np.ndarray:
+    def compute_loss(self, x: np.ndarray, y: np.ndarray, **kwargs) -> np.ndarray:
         """
         Compute the loss of the neural network for samples `x`.
 
@@ -534,32 +480,12 @@ class NeuralNetworkMixin(ABC):
         """
         raise NotImplementedError
 
-    @property  # type: ignore
-    @deprecated(end_version="1.5.0", replaced_by="channels_first")
-    def channel_index(self) -> Optional[int]:
-        """
-        :return: Index of the axis containing the color channels in the samples `x`.
-        """
-        return self._channel_index
-
     @property
     def channels_first(self) -> Optional[bool]:
         """
         :return: Boolean to indicate index of the color channels in the sample `x`.
         """
         return self._channels_first
-
-    @property
-    def learning_phase(self) -> Optional[bool]:
-        """
-        The learning phase set by the user. Possible values are `True` for training or `False` for prediction and
-        `None` if it has not been set by the library. In the latter case, the library does not do any explicit learning
-        phase manipulation and the current value of the backend framework is used. If a value has been set by the user
-        for this property, it will impact all following computations for model fitting, prediction and gradients.
-
-        :return: Learning phase.
-        """
-        return self._learning_phase  # type: ignore
 
     @property
     def layer_names(self) -> Optional[List[str]]:
@@ -579,9 +505,9 @@ class NeuralNetworkMixin(ABC):
         name = self.__class__.__name__
 
         attributes = {}
-        for k, v in self.__dict__.items():
+        for k, value in self.__dict__.items():
             k = k[1:] if k[0] == "_" else k
-            attributes[k] = v
+            attributes[k] = value
         attrs = ["{}={}".format(k, v) for k, v in attributes.items()]
         repr_ = name + "(" + ", ".join(attrs) + ")"
 

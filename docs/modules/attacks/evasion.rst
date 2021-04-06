@@ -14,6 +14,12 @@ Adversarial Patch - Numpy
    :members:
    :special-members:
 
+Adversarial Patch - PyTorch
+---------------------------
+.. autoclass:: AdversarialPatchPyTorch
+   :members:
+   :special-members:
+
 Adversarial Patch - TensorFlowV2
 --------------------------------
 .. autoclass:: AdversarialPatchTensorFlowV2
@@ -32,9 +38,15 @@ Auto Projected Gradient Descent (Auto-PGD)
    :members:
    :special-members:
 
-Decision-Based Attack / Boundary Attack
+Boundary Attack / Decision-Based Attack
 ---------------------------------------
 .. autoclass:: BoundaryAttack
+   :members:
+   :special-members:
+
+Brendel and Bethge Attack
+-------------------------
+.. autoclass:: BrendelBethgeAttack
    :members:
    :special-members:
 
@@ -47,6 +59,12 @@ Carlini and Wagner L_2 Attack
 Carlini and Wagner L_inf Attack
 -------------------------------
 .. autoclass:: CarliniLInfMethod
+   :members:
+   :special-members:
+
+Carlini and Wagner ASR Attack
+-----------------------------
+.. autoclass:: CarliniWagnerASR
    :members:
    :special-members:
 
@@ -65,6 +83,12 @@ DeepFool
 DPatch
 ------
 .. autoclass:: DPatch
+   :members:
+   :special-members:
+
+RobustDPatch
+------------
+.. autoclass:: RobustDPatch
    :members:
    :special-members:
 
@@ -92,15 +116,27 @@ Frame Saliency Attack
    :members:
    :special-members:
 
+High Confidence Low Uncertainty Attack
+--------------------------------------
+.. autoclass:: HighConfidenceLowUncertainty
+   :members:
+   :special-members:
+
 HopSkipJump Attack
 ------------------
 .. autoclass:: HopSkipJump
    :members:
    :special-members:
 
-High Confidence Low Uncertainty Attack
---------------------------------------
-.. autoclass:: HighConfidenceLowUncertainty
+Imperceptible ASR Attack
+------------------------
+.. autoclass:: ImperceptibleASR
+   :members:
+   :special-members:
+
+Imperceptible ASR Attack - PyTorch
+----------------------------------
+.. autoclass:: ImperceptibleASRPyTorch
    :members:
    :special-members:
 
@@ -170,8 +206,8 @@ ShapeShifter Attack
    :members:
    :special-members:
 
-SimBA Attack
-------------
+Simple Black-box Adversarial Attack
+-----------------------------------
 .. autoclass:: SimBA
    :members:
    :special-members:
@@ -212,7 +248,7 @@ Wasserstein Attack
    :members:
    :special-members:
 
-Zeroth-Order Optimization Attack (ZOO)
+Zeroth-Order Optimization (ZOO) Attack
 --------------------------------------
 .. autoclass:: ZooAttack
    :members:

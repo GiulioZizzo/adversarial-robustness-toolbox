@@ -30,10 +30,9 @@ from io import BytesIO
 from typing import Optional, Tuple
 
 import numpy as np
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 from art.defences.preprocessor.preprocessor import Preprocessor
-from art.utils import Deprecated, deprecated_keyword_arg
 
 logger = logging.getLogger(__name__)
 
@@ -43,13 +42,11 @@ class Mp3Compression(Preprocessor):
     Implement the MP3 compression defense approach.
     """
 
-    params = ["channel_index", "channels_first", "sample_rate", "verbose"]
+    params = ["channels_first", "sample_rate", "verbose"]
 
-    @deprecated_keyword_arg("channel_index", end_version="1.5.0", replaced_by="channels_first")
     def __init__(
         self,
         sample_rate: int,
-        channel_index=Deprecated,
         channels_first: bool = False,
         apply_fit: bool = False,
         apply_predict: bool = True,
@@ -59,38 +56,16 @@ class Mp3Compression(Preprocessor):
         Create an instance of MP3 compression.
 
         :param sample_rate: Specifies the sampling rate of sample.
-        :param channel_index: Index of the axis containing the audio channels.
-        :type channel_index: `int`
         :param channels_first: Set channels first or last.
         :param apply_fit: True if applied during fitting/training.
         :param apply_predict: True if applied during predicting.
         :param verbose: Show progress bars.
         """
-        # Remove in 1.5.0
-        if channel_index == 3:
-            channels_first = False
-        elif channel_index == 1:
-            channels_first = True
-        elif channel_index is not Deprecated:
-            raise ValueError("Not a proper channel_index. Use channels_first.")
-
-        super().__init__()
-        self._is_fitted = True
-        self._apply_fit = apply_fit
-        self._apply_predict = apply_predict
-        self.channel_index = channel_index
+        super().__init__(is_fitted=True, apply_fit=apply_fit, apply_predict=apply_predict)
         self.channels_first = channels_first
         self.sample_rate = sample_rate
         self.verbose = verbose
         self._check_params()
-
-    @property
-    def apply_fit(self) -> bool:
-        return self._apply_fit
-
-    @property
-    def apply_predict(self) -> bool:
-        return self._apply_predict
 
     def __call__(self, x: np.ndarray, y: Optional[np.ndarray] = None) -> Tuple[np.ndarray, Optional[np.ndarray]]:
         """
@@ -110,9 +85,9 @@ class Mp3Compression(Preprocessor):
             # length. Writing and reading MP3 from local file system works without problems. It is
             # easy to move from using BytesIO to local read/writes with the following:
             # import os
-            # from art.config import ART_DATA_PATH
-            # tmp_wav = os.path.join(ART_DATA_PATH, "tmp.wav")
-            # tmp_mp3 = os.path.join(ART_DATA_PATH, "tmp.mp3")
+            # from art import config
+            # tmp_wav = os.path.join(config.ART_DATA_PATH, "tmp.wav")
+            # tmp_mp3 = os.path.join(config.ART_DATA_PATH, "tmp.mp3")
             from pydub import AudioSegment
             from scipy.io.wavfile import write
 
@@ -172,15 +147,6 @@ class Mp3Compression(Preprocessor):
             x_mp3 = np.swapaxes(x_mp3, 1, 2)
 
         return x_mp3, y
-
-    def estimate_gradient(self, x: np.ndarray, grad: np.ndarray) -> np.ndarray:
-        return grad
-
-    def fit(self, x: np.ndarray, y: Optional[np.ndarray] = None, **kwargs) -> None:
-        """
-        No parameters to learn for this method; do nothing.
-        """
-        pass
 
     def _check_params(self) -> None:
         if not (isinstance(self.sample_rate, (int, np.int)) and self.sample_rate > 0):
